@@ -97,8 +97,9 @@ canvas#c {
 
 .metrics-bar {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  border-top: 1px solid var(--border);
+  grid-template-columns: repeat(6, 1fr);
+  border-top: 1px solid var(--border2);
+  background: #0a0b0d;
 }
 
 .metric-cell {
@@ -111,7 +112,7 @@ canvas#c {
 .metric-label {
   font-family: var(--mono);
   font-size: 10px;
-  color: var(--text3);
+  color: #6a7080;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   margin-bottom: 4px;
@@ -121,13 +122,13 @@ canvas#c {
   font-family: var(--mono);
   font-size: 22px;
   font-weight: 500;
-  color: var(--text);
+  color: #f0f2f8;
   line-height: 1;
 }
 
 .metric-unit {
   font-size: 11px;
-  color: var(--text3);
+  color: #6a7080;
   margin-top: 3px;
   font-family: var(--mono);
 }
@@ -378,7 +379,9 @@ select:focus { border-color: var(--accent); }
 
     <div>
       <div class="section-label">判定</div>
-      <div id="statusPill" class="status-pill status-ok">◉ 正常定着</div>
+      <div id="statusContainer" style="display:flex;flex-direction:column;gap:6px">
+        <div id="statusPill" class="status-pill status-ok">◉ 正常定着</div>
+      </div>
     </div>
 
     <div style="margin-top:auto">
@@ -429,6 +432,16 @@ select:focus { border-color: var(--accent); }
         <div class="metric-label">定着強度指標</div>
         <div class="metric-value" id="mFix">—</div>
         <div class="metric-unit">%</div>
+      </div>
+      <div class="metric-cell" style="border-left: 1px solid var(--border2)">
+        <div class="metric-label" style="color:#29c98f">ワックス → フィルム側</div>
+        <div class="metric-value" id="mWaxFilm" style="color:#29c98f">—</div>
+        <div class="metric-unit">% (添加量比)</div>
+      </div>
+      <div class="metric-cell">
+        <div class="metric-label" style="color:#5dc8a0">ワックス → ペーパー側</div>
+        <div class="metric-value" id="mWaxPaper" style="color:#5dc8a0">—</div>
+        <div class="metric-unit">% (添加量比)</div>
       </div>
     </div>
   </div>
@@ -502,9 +515,44 @@ function calcPhysics(p, t) {
   const Y = 1.82e9, thick = 96e-6, R = 8.13e-3;
   const Ebend = 0.5 * (Y * Math.pow(thick, 3) / 12) * Math.pow(1 / R, 2);
   const resFactor = [1, 1.3, 1.8, 3.2][p.res];
-  const offsetRisk = (Eadh * resFactor * 1.1) / Ebend;
+  const offsetRisk = (Eadh * resFactor * 1.1) / Ebend;  // 静電オフセット
+
+  // ホットオフセットリスク: 高温・低圧・低ワックスでトナーがフィルムに付着しやすい
+  // - 定着温度が高いほどトナー粘弾性が低下しフィルムへの移行が増加
+  // - 圧力が低いほど分離力不足
+  // - ワックスが少ないほど離型性不足
+  // - 粒子径が大きいほど接触面積増加
+  const hotTempDrive = Math.max(0, (p.T - 190) / 40);          // 190°C超から増加（従来200°C）
+  const hotWaxRelief = Math.max(0.1, 1 - p.wax / 8);           // ワックス8%で最大抑制（従来6%）
+  const hotPresRelief = Math.max(0, 1 - (p.P - 0.05) / 0.35);  // 低圧ほどリスク増
+  const hotOffsetRisk = Math.min(2, hotTempDrive * hotWaxRelief * (1 + hotPresRelief) * (p.d / 6));
+
   const fixStrength = Math.min(100, coverage * 0.8 + meltRatio * 20);
-  return { meltRatio, coverage, Eadh, Ebend, nipTime, offsetRisk, fixStrength };
+
+  // ── ワックスしみ出しモデル ─────────────────────────────────────
+  // ワックスの移動は温度・圧力・溶融度・ニップ時間・粒子径に依存
+  // ペーパー側: 圧力勾配と重力で下方へ移動しやすい。粗面ほど界面エネルギーが大きく吸収量増加
+  // フィルム側: 温度が高い側（フィルム面）は粘度低下で移動しやすいが、圧力で押し返される
+  // 全体しみ出し率: 溶融率・温度・ニップ時間・ワックス量が多いほど増加。粒子径が小さいほど表面積/体積比が大きく増加
+  if (p.wax === 0) {
+    var waxPaper = 0, waxFilm = 0;
+  } else {
+    const tempDrive = Math.min(1, Math.max(0, (p.T - p.Tvis) / 60));  // 温度による拡散駆動
+    const nipDrive  = Math.min(1, nipTime / 40);                        // ニップ時間（長いほど拡散）
+    const diamDrive = Math.min(1.5, 6 / p.d);                          // 粒子径（小さいほど表面積比大）
+    const totalExud = Math.min(80, meltRatio * tempDrive * nipDrive * diamDrive * 45 * t);
+
+    // ペーパー側: 圧力と粗さで増加（圧力がワックスを紙面へ押し付ける）
+    const paperBias = 0.55 + pressEffect * 0.15 + (roughFactor - 1) * 0.12;
+    // フィルム側: 高温側への熱泳動。フィルム抵抗率が低いほどフィルム密着が良く移行しにくい
+    const filmResFactor = [1, 1.3, 1.1, 0.9][p.res];
+    const filmBias  = (1 - paperBias) * filmResFactor;
+
+    var waxPaper = Math.min(75, totalExud * paperBias);
+    var waxFilm  = Math.min(40, totalExud * filmBias);
+  }
+
+  return { meltRatio, coverage, Eadh, Ebend, nipTime, offsetRisk, hotOffsetRisk, fixStrength, waxPaper, waxFilm };
 }
 
 function updateMetrics() {
@@ -514,18 +562,42 @@ function updateMetrics() {
   document.getElementById('mPeel').textContent = ph.Eadh.toFixed(2);
   document.getElementById('mNip').textContent = ph.nipTime.toFixed(1);
   document.getElementById('mFix').textContent = Math.round(ph.fixStrength) + '%';
-
-  const sp = document.getElementById('statusPill');
-  if (ph.offsetRisk > 1.5) {
-    sp.textContent = '⚠ 静電オフセットリスク';
-    sp.className = 'status-pill status-danger';
-  } else if (ph.Eadh > ph.Ebend * 0.85) {
-    sp.textContent = '⚠ 巻き付きリスク注意';
-    sp.className = 'status-pill status-warn';
+  if (p.wax === 0) {
+    document.getElementById('mWaxFilm').textContent = '—';
+    document.getElementById('mWaxPaper').textContent = '—';
   } else {
-    sp.textContent = '◉ 正常定着';
-    sp.className = 'status-pill status-ok';
+    document.getElementById('mWaxFilm').textContent = ph.waxFilm.toFixed(1) + '%';
+    document.getElementById('mWaxPaper').textContent = ph.waxPaper.toFixed(1) + '%';
   }
+
+  const container = document.getElementById('statusContainer');
+  const pills = [];
+
+  // ホットオフセット
+  if (ph.hotOffsetRisk > 0.8) {
+    pills.push({ text: '🔥 ホットオフセットリスク', cls: 'status-danger' });
+  } else if (ph.hotOffsetRisk > 0.4) {
+    pills.push({ text: '⚠ ホットオフセット注意', cls: 'status-warn' });
+  }
+
+  // 静電オフセット
+  if (ph.offsetRisk > 1.5) {
+    pills.push({ text: '⚡ 静電オフセットリスク', cls: 'status-danger' });
+  }
+
+  // 巻き付き
+  if (ph.Eadh > ph.Ebend * 0.85) {
+    pills.push({ text: '⚠ 巻き付きリスク注意', cls: 'status-warn' });
+  }
+
+  // 何もなければ正常
+  if (pills.length === 0) {
+    pills.push({ text: '◉ 正常定着', cls: 'status-ok' });
+  }
+
+  container.innerHTML = pills
+    .map(p => `<div class="status-pill ${p.cls}">${p.text}</div>`)
+    .join('');
 }
 
 function lerp(a, b, t) { return a + (b - a) * t; }
@@ -590,10 +662,10 @@ function draw(t) {
   ctx.fillStyle = hGlow;
   ctx.fillRect(nipX1 - 20, hRollerCY, nipW + 40, filmTop - hRollerCY);
 
-  ctx.fillStyle = 'rgba(77,159,255,0.45)';
-  ctx.font = '500 10px DM Mono, monospace';
+  ctx.fillStyle = 'rgba(130,195,255,0.95)';
+  ctx.font = '500 11px DM Mono, monospace';
   ctx.textAlign = 'center';
-  ctx.fillText('HEAT ROLLER', nipCX, hRollerCY - hRollerRY + 14);
+  ctx.fillText('HEAT ROLLER', nipCX, hRollerCY - hRollerRY + 16);
 
   // ── Fusing film ───────────────────────────────────────────────
   const filmGrad = ctx.createLinearGradient(0, filmTop, 0, filmBot);
@@ -604,10 +676,10 @@ function draw(t) {
   ctx.strokeStyle = 'rgba(77,159,255,0.55)'; ctx.lineWidth = 0.5; ctx.stroke();
 
   // film label (left side, outside nip)
-  ctx.fillStyle = 'rgba(77,159,255,0.5)';
-  ctx.font = '9px DM Mono, monospace';
+  ctx.fillStyle = 'rgba(130,195,255,0.95)';
+  ctx.font = '500 11px DM Mono, monospace';
   ctx.textAlign = 'right';
-  ctx.fillText('FILM', nipX1 - 26, filmTop + filmH/2 + 3);
+  ctx.fillText('FILM', nipX1 - 12, filmTop + filmH/2 + 4);
 
   // charge accumulation
   if (p.res === 3 && t > 0.2) {
@@ -635,10 +707,10 @@ function draw(t) {
   ctx.beginPath(); ctx.roundRect(nipX1 - 20, paperTop, nipW + 40, paperH, 2); ctx.fill();
   ctx.strokeStyle = 'rgba(136,135,128,0.35)'; ctx.lineWidth = 0.5; ctx.stroke();
 
-  ctx.fillStyle = 'rgba(84,88,104,0.5)';
-  ctx.font = '9px DM Mono, monospace';
+  ctx.fillStyle = 'rgba(200,200,210,0.9)';
+  ctx.font = '500 11px DM Mono, monospace';
   ctx.textAlign = 'right';
-  ctx.fillText('PAPER', nipX1 - 26, paperTop + paperH/2 + 3);
+  ctx.fillText('PAPER', nipX1 - 12, paperTop + paperH/2 + 4);
 
   // ── Pressure roller ───────────────────────────────────────────
   const prGrad = ctx.createRadialGradient(nipCX - pRollerRX*0.3, pRollerCY - pRollerRY*0.3, pRollerRY*0.1, nipCX, pRollerCY, pRollerRX);
@@ -649,8 +721,8 @@ function draw(t) {
   ctx.fillStyle = prGrad; ctx.fill();
   ctx.strokeStyle = 'rgba(160,125,248,0.25)'; ctx.lineWidth = 1; ctx.stroke();
 
-  ctx.fillStyle = 'rgba(160,125,248,0.45)';
-  ctx.font = '500 10px DM Mono, monospace';
+  ctx.fillStyle = 'rgba(190,165,255,0.95)';
+  ctx.font = '500 11px DM Mono, monospace';
   ctx.textAlign = 'center';
   ctx.fillText('PRESSURE ROLLER', nipCX, pRollerCY + pRollerRY - 12);
 
@@ -688,16 +760,31 @@ function draw(t) {
       ctx.strokeStyle = `rgba(${r1-30},${g1},${b1},0.35)`;
       ctx.lineWidth = 0.5; ctx.stroke();
 
-      // wax exudation from bottom row towards paper
-      if (t > 0.35 && p.wax > 0 && row === 0) {
+      // wax exudation — paper side (bottom, green) and film side (top, teal)
+      if (t > 0.35 && p.wax > 0) {
         const waxAlpha = Math.min(1, (t - 0.35) * 2.2);
         const waxCount = Math.ceil(p.wax / 3.5);
-        for (let w = 0; w < waxCount; w++) {
-          const wx = bx - rx0 * 0.28 + w * (rx0 * 0.38);
-          const wy = ty + ry0 * 0.75 + mr * ry0 * 0.5;
-          const wr = Math.min(3, mr * 3 * p.wax / 10);
-          ctx.beginPath(); ctx.arc(wx, wy, wr, 0, Math.PI*2);
-          ctx.fillStyle = `rgba(41,201,143,${waxAlpha * 0.85})`; ctx.fill();
+
+        // ペーパー側: bottom row → towards paper
+        if (row === 0) {
+          for (let w = 0; w < waxCount; w++) {
+            const wx = bx - rx0 * 0.28 + w * (rx0 * 0.38);
+            const wy = ty + ry0 * 0.75 + mr * ry0 * 0.5;
+            const wr = Math.min(3.5, mr * 3.5 * ph.waxPaper / 50);
+            ctx.beginPath(); ctx.arc(wx, wy, wr, 0, Math.PI*2);
+            ctx.fillStyle = `rgba(41,201,143,${waxAlpha * 0.9})`; ctx.fill();
+          }
+        }
+        // フィルム側: top row → towards film
+        if (row === rows - 1 && ph.waxFilm > 0) {
+          const filmWaxAlpha = waxAlpha * (ph.waxFilm / Math.max(ph.waxPaper, 1));
+          for (let w = 0; w < Math.max(1, waxCount - 1); w++) {
+            const wx = bx - rx0 * 0.2 + w * (rx0 * 0.42);
+            const wy = ty - ry0 * 0.7 - mr * ry0 * 0.4;
+            const wr = Math.min(2.5, mr * 2.5 * ph.waxFilm / 30);
+            ctx.beginPath(); ctx.arc(wx, wy, wr, 0, Math.PI*2);
+            ctx.fillStyle = `rgba(100,220,180,${filmWaxAlpha * 0.8})`; ctx.fill();
+          }
         }
       }
     }
@@ -710,8 +797,8 @@ function draw(t) {
   ctx.beginPath(); ctx.moveTo(nipX1, filmTop - 18); ctx.lineTo(nipX1, paperBot + 18); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(nipX2, filmTop - 18); ctx.lineTo(nipX2, paperBot + 18); ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle = 'rgba(255,255,255,0.1)';
-  ctx.font = '9px DM Mono, monospace';
+  ctx.fillStyle = 'rgba(220,225,235,0.75)';
+  ctx.font = '500 10px DM Mono, monospace';
   ctx.textAlign = 'left';
   ctx.fillText('NIP IN', nipX1 + 4, filmTop - 22);
   ctx.textAlign = 'right';
@@ -724,38 +811,41 @@ function draw(t) {
   ctx.beginPath(); ctx.moveTo(dimX, filmBot); ctx.lineTo(dimX, paperTop); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(dimX - 4, filmBot); ctx.lineTo(dimX + 4, filmBot); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(dimX - 4, paperTop); ctx.lineTo(dimX + 4, paperTop); ctx.stroke();
-  ctx.fillStyle = 'rgba(255,255,255,0.2)';
-  ctx.font = '9px DM Mono, monospace';
+  ctx.fillStyle = 'rgba(220,225,235,0.7)';
+  ctx.font = '10px DM Mono, monospace';
   ctx.textAlign = 'left';
   ctx.fillText('トナー層', dimX + 8, midY + 3);
 
-  // ── Temperature bar (right side, clearly spaced) ───────────────
-  const tbX = W - 28;
+  // ── Temperature bar (right side, with enough margin) ─────────
+  const tbX = W - 42;
   const tbY1 = H * 0.12;
   const tbY2 = H * 0.88;
   const tbH = tbY2 - tbY1;
   const tempFrac = (p.T - 130) / 100;
-  ctx.fillStyle = 'rgba(255,255,255,0.04)';
-  ctx.beginPath(); ctx.roundRect(tbX, tbY1, 5, tbH, 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.beginPath(); ctx.roundRect(tbX, tbY1, 6, tbH, 3); ctx.fill();
   const tBarGrad = ctx.createLinearGradient(0, tbY1, 0, tbY2);
   tBarGrad.addColorStop(0, '#ff5c35');
   tBarGrad.addColorStop(0.5, '#f0a820');
   tBarGrad.addColorStop(1, '#4d9fff');
   const fillH2 = tbH * tempFrac;
   ctx.fillStyle = tBarGrad;
-  ctx.beginPath(); ctx.roundRect(tbX, tbY2 - fillH2, 5, fillH2, 2); ctx.fill();
-  ctx.fillStyle = 'rgba(255,92,53,0.55)';
-  ctx.font = '9px DM Mono, monospace';
-  ctx.textAlign = 'center';
-  ctx.save();
-  ctx.translate(tbX + 2, tbY1 + tbH / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.fillText('TEMP', 0, 0);
-  ctx.restore();
-  ctx.fillStyle = `rgba(255,${Math.round(140 - heatFrac*80)},40,0.7)`;
+  ctx.beginPath(); ctx.roundRect(tbX, tbY2 - fillH2, 6, fillH2, 3); ctx.fill();
+  // TEMP vertical label
+  ctx.fillStyle = 'rgba(200,210,230,0.7)';
   ctx.font = '500 9px DM Mono, monospace';
   ctx.textAlign = 'center';
-  ctx.fillText(p.T + '°C', tbX + 2, tbY2 - fillH2 - 5);
+  ctx.save();
+  ctx.translate(tbX + 3, tbY1 + tbH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('TEMPERATURE', 0, 0);
+  ctx.restore();
+  // temperature value label — placed to the left of the bar
+  const tempLabelY = Math.max(tbY1 + 12, tbY2 - fillH2 - 6);
+  ctx.fillStyle = `rgba(255,${Math.round(180 - heatFrac * 100)},80,0.95)`;
+  ctx.font = '500 10px DM Mono, monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(p.T + '°C', tbX - 6, tempLabelY);
 
   // ── Warning labels ─────────────────────────────────────────────
   if (ph.Eadh > ph.Ebend * 0.75 && t > 0.3) {
